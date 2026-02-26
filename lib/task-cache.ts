@@ -14,6 +14,7 @@ import type { ClickUpTask, ClickUpStatus, ClickUpAssignee } from "./types";
 
 const CACHE_PATH = path.join("/tmp", "clickup-tasks-cache.json");
 const MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+let memoryCache: CacheData | null = null;
 
 interface CachePayload {
   timestamp: string; // ISO
@@ -29,30 +30,51 @@ export interface CacheData {
   cachedAt: Date;
 }
 
+function isFresh(cachedAt: Date): boolean {
+  return Date.now() - cachedAt.getTime() <= MAX_AGE_MS;
+}
+
+function normalizeCache(data: CachePayload): CacheData | null {
+  if (!data.tasks || !data.timestamp) return null;
+  const cachedAt = new Date(data.timestamp);
+  if (isNaN(cachedAt.getTime())) return null;
+  return {
+    tasks: data.tasks,
+    statuses: data.statuses ?? [],
+    members: data.members ?? [],
+    cachedAt,
+  };
+}
+
 /** Read cache from disk. Returns null if missing, corrupt, or stale. */
-export async function readCache(): Promise<CacheData | null> {
+export async function readCache(options: { allowStale?: boolean } = {}): Promise<CacheData | null> {
+  const allowStale = options.allowStale === true;
+
+  if (memoryCache) {
+    const age = Date.now() - memoryCache.cachedAt.getTime();
+    if (isFresh(memoryCache.cachedAt) || allowStale) {
+      console.log(
+        `[v0] Memory cache hit: ${memoryCache.tasks.length} tasks, ${Math.round(age / 60_000)}m old`
+      );
+      return memoryCache;
+    }
+  }
+
   try {
     const raw = await fs.readFile(CACHE_PATH, "utf-8");
-    const data: CachePayload = JSON.parse(raw);
+    const parsed = normalizeCache(JSON.parse(raw) as CachePayload);
+    if (!parsed) return null;
 
-    if (!data.tasks || !data.timestamp) return null;
+    const age = Date.now() - parsed.cachedAt.getTime();
 
-    const cachedAt = new Date(data.timestamp);
-    const age = Date.now() - cachedAt.getTime();
-
-    if (age > MAX_AGE_MS) {
+    if (!allowStale && !isFresh(parsed.cachedAt)) {
       console.log(`[v0] Cache stale (${Math.round(age / 60_000)}m)`);
       return null;
     }
 
-    console.log(`[v0] Cache hit: ${data.tasks.length} tasks, ${Math.round(age / 60_000)}m old`);
-
-    return {
-      tasks: data.tasks,
-      statuses: data.statuses ?? [],
-      members: data.members ?? [],
-      cachedAt,
-    };
+    console.log(`[v0] Disk cache hit: ${parsed.tasks.length} tasks, ${Math.round(age / 60_000)}m old`);
+    memoryCache = parsed;
+    return parsed;
   } catch {
     return null;
   }
@@ -60,6 +82,13 @@ export async function readCache(): Promise<CacheData | null> {
 
 /** Update a single task in the cache (in-place). */
 export async function updateCacheTask(updated: ClickUpTask): Promise<void> {
+  if (memoryCache?.tasks?.length) {
+    const idx = memoryCache.tasks.findIndex((t) => t.id === updated.id);
+    if (idx !== -1) {
+      memoryCache.tasks[idx] = updated;
+    }
+  }
+
   try {
     const raw = await fs.readFile(CACHE_PATH, "utf-8");
     const data: CachePayload = JSON.parse(raw);
@@ -81,8 +110,16 @@ export async function writeCache(
   statuses: ClickUpStatus[] = [],
   members: ClickUpAssignee[] = []
 ): Promise<void> {
+  const now = new Date();
+  memoryCache = {
+    tasks,
+    statuses,
+    members,
+    cachedAt: now,
+  };
+
   const payload: CachePayload = {
-    timestamp: new Date().toISOString(),
+    timestamp: now.toISOString(),
     tasks,
     statuses,
     members,

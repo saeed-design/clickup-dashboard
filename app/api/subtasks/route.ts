@@ -5,6 +5,32 @@ import type { ClickUpTask, ClickUpStatus, ClickUpAssignee } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300; // 5 minutes for fetching from large workspaces
+const FETCH_BUDGET_MS = 45_000;
+
+async function fetchClickUpPayload() {
+  const [t, s, m] = await Promise.allSettled([
+    fetchAllTasks(),
+    fetchStatuses(),
+    fetchMembers(),
+  ]);
+
+  if (t.status === "rejected") throw t.reason;
+
+  return {
+    allTasks: t.value,
+    availableStatuses: s.status === "fulfilled" ? s.value : [],
+    availableAssignees: m.status === "fulfilled" ? m.value : [],
+  };
+}
+
+async function fetchWithBudget() {
+  return Promise.race([
+    fetchClickUpPayload(),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`ClickUp fetch exceeded ${FETCH_BUDGET_MS}ms`)), FETCH_BUDGET_MS);
+    }),
+  ]);
+}
 
 /**
  * GET /api/subtasks
@@ -47,6 +73,7 @@ async function handleRequest(req: NextRequest) {
   let availableStatuses: ClickUpStatus[] = [];
   let availableAssignees: ClickUpAssignee[] = [];
   let cachedAt: Date | null = null;
+  const staleCache = await readCache({ allowStale: true });
 
   // Try cache first (instant)
   if (!forceRefresh) {
@@ -59,29 +86,54 @@ async function handleRequest(req: NextRequest) {
       
       console.log("[v0] Using cached data - Statuses:", availableStatuses.length, "Assignees:", availableAssignees.length);
     } else {
-      // Cache miss -- fetch everything in parallel
-      // Now fetchStatuses() and fetchMembers() will automatically use space ID
-      const [t, s, m] = await Promise.allSettled([fetchAllTasks(), fetchStatuses(), fetchMembers()]);
-      if (t.status === "rejected") throw t.reason;
-      allTasks = t.value;
-      availableStatuses = s.status === "fulfilled" ? s.value : [];
-      availableAssignees = m.status === "fulfilled" ? m.value : [];
-      cachedAt = new Date();
-      
-      console.log("[v0] Fresh fetch - Statuses:", availableStatuses.length, "Assignees:", availableAssignees.length);
-      writeCache(allTasks, availableStatuses, availableAssignees).catch(() => {});
+      if (staleCache) {
+        allTasks = staleCache.tasks;
+        availableStatuses = staleCache.statuses;
+        availableAssignees = staleCache.members;
+        cachedAt = staleCache.cachedAt;
+
+        console.log("[v0] Using stale cache while refreshing in background - Statuses:", availableStatuses.length, "Assignees:", availableAssignees.length);
+        void fetchWithBudget()
+          .then((payload) =>
+            writeCache(
+              payload.allTasks,
+              payload.availableStatuses,
+              payload.availableAssignees
+            )
+          )
+          .catch((err) => console.log("[v0] Subtasks background refresh failed:", err));
+      } else {
+        // Cache miss -- fetch everything from ClickUp with budget
+        const payload = await fetchWithBudget();
+        allTasks = payload.allTasks;
+        availableStatuses = payload.availableStatuses;
+        availableAssignees = payload.availableAssignees;
+        cachedAt = new Date();
+
+        console.log("[v0] Fresh fetch - Statuses:", availableStatuses.length, "Assignees:", availableAssignees.length);
+        writeCache(allTasks, availableStatuses, availableAssignees).catch(() => {});
+      }
     }
   } else {
-    // Forced refresh - fetch everything fresh from space
-    const [t, s, m] = await Promise.allSettled([fetchAllTasks(), fetchStatuses(), fetchMembers()]);
-    if (t.status === "rejected") throw t.reason;
-    allTasks = t.value;
-    availableStatuses = s.status === "fulfilled" ? s.value : [];
-    availableAssignees = m.status === "fulfilled" ? m.value : [];
-    cachedAt = new Date();
-    
-    console.log("[v0] Forced refresh - Statuses:", availableStatuses.length, "Assignees:", availableAssignees.length);
-    writeCache(allTasks, availableStatuses, availableAssignees).catch(() => {});
+    // Forced refresh - fetch everything fresh from space with budget
+    try {
+      const payload = await fetchWithBudget();
+      allTasks = payload.allTasks;
+      availableStatuses = payload.availableStatuses;
+      availableAssignees = payload.availableAssignees;
+      cachedAt = new Date();
+
+      console.log("[v0] Forced refresh - Statuses:", availableStatuses.length, "Assignees:", availableAssignees.length);
+      writeCache(allTasks, availableStatuses, availableAssignees).catch(() => {});
+    } catch (err) {
+      if (!staleCache) throw err;
+
+      allTasks = staleCache.tasks;
+      availableStatuses = staleCache.statuses;
+      availableAssignees = staleCache.members;
+      cachedAt = staleCache.cachedAt;
+      console.log("[v0] Forced refresh failed, serving stale cache:", err);
+    }
   }
 
   // Build a taskId -> task lookup
