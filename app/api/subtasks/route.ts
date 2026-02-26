@@ -5,7 +5,6 @@ import type { ClickUpTask, ClickUpStatus, ClickUpAssignee } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300; // 5 minutes for fetching from large workspaces
-const FETCH_BUDGET_MS = 45_000;
 
 async function fetchClickUpPayload() {
   const [t, s, m] = await Promise.allSettled([
@@ -21,15 +20,6 @@ async function fetchClickUpPayload() {
     availableStatuses: s.status === "fulfilled" ? s.value : [],
     availableAssignees: m.status === "fulfilled" ? m.value : [],
   };
-}
-
-async function fetchWithBudget() {
-  return Promise.race([
-    fetchClickUpPayload(),
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`ClickUp fetch exceeded ${FETCH_BUDGET_MS}ms`)), FETCH_BUDGET_MS);
-    }),
-  ]);
 }
 
 /**
@@ -93,7 +83,7 @@ async function handleRequest(req: NextRequest) {
         cachedAt = staleCache.cachedAt;
 
         console.log("[v0] Using stale cache while refreshing in background - Statuses:", availableStatuses.length, "Assignees:", availableAssignees.length);
-        void fetchWithBudget()
+        void fetchClickUpPayload()
           .then((payload) =>
             writeCache(
               payload.allTasks,
@@ -103,8 +93,8 @@ async function handleRequest(req: NextRequest) {
           )
           .catch((err) => console.log("[v0] Subtasks background refresh failed:", err));
       } else {
-        // Cache miss -- fetch everything from ClickUp with budget
-        const payload = await fetchWithBudget();
+        // Cache miss -- fetch everything from ClickUp
+        const payload = await fetchClickUpPayload();
         allTasks = payload.allTasks;
         availableStatuses = payload.availableStatuses;
         availableAssignees = payload.availableAssignees;
@@ -115,9 +105,9 @@ async function handleRequest(req: NextRequest) {
       }
     }
   } else {
-    // Forced refresh - fetch everything fresh from space with budget
+    // Forced refresh - fetch everything fresh from space
     try {
-      const payload = await fetchWithBudget();
+      const payload = await fetchClickUpPayload();
       allTasks = payload.allTasks;
       availableStatuses = payload.availableStatuses;
       availableAssignees = payload.availableAssignees;
