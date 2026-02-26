@@ -7,6 +7,8 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  Check,
   X,
   ListChecks,
   Filter,
@@ -61,6 +63,7 @@ interface SubtasksApiResponse {
   availableCSMs: string[];
   availableStatuses: ClickUpStatus[];
   availableAssignees: ClickUpAssignee[];
+  availablePriorities: { priority: string; color: string }[];
   availableLists: string[];
   cachedAt?: string | null;
   error?: string;
@@ -190,6 +193,76 @@ function CustomFieldValue({
   return <span>{String(field.value)}</span>;
 }
 
+function MultiSelectDropdown({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  options: { value: string; label: string }[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex h-8 min-w-[180px] items-center justify-between gap-2 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+      >
+        <span className="truncate text-left">
+          {selected.length === 0 ? label : `${selected.length} selected`}
+        </span>
+        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-md border border-border bg-popover p-1 shadow-lg">
+            <div className="max-h-56 overflow-auto">
+              {options.map((opt) => {
+                const checked = selected.includes(opt.value);
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() =>
+                      onChange(
+                        checked
+                          ? selected.filter((v) => v !== opt.value)
+                          : [...selected, opt.value]
+                      )
+                    }
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-popover-foreground hover:bg-accent"
+                  >
+                    <span className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-[3px] border border-border bg-background">
+                      {checked && <Check className="h-3 w-3" />}
+                    </span>
+                    <span className="truncate">{opt.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {selected.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onChange([])}
+                className="mt-1 w-full rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-accent"
+              >
+                Clear assignees
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ── Main Page Component ── */
 
 export default function SubtasksPage() {
@@ -199,7 +272,7 @@ export default function SubtasksPage() {
   const [searchInput, setSearchInput] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [csmFilter, setCsmFilter] = useState("");
-  const [assigneeFilter, setAssigneeFilter] = useState("");
+  const [assigneeFilter, setAssigneeFilter] = useState<string[]>([]);
   const [priorityFilter, setPriorityFilter] = useState("");
   const [listFilter, setListFilter] = useState("");
   const [dueBefore, setDueBefore] = useState("");
@@ -215,7 +288,11 @@ export default function SubtasksPage() {
     if (search) params.set("search", search);
     if (statusFilter) params.set("status", statusFilter);
     if (csmFilter) params.set("csm", csmFilter);
-    if (assigneeFilter) params.set("assignee", assigneeFilter);
+    if (assigneeFilter.length > 0) {
+      for (const assignee of assigneeFilter) {
+        params.append("assignee", assignee);
+      }
+    }
     if (priorityFilter) params.set("priority", priorityFilter);
     if (listFilter) params.set("list", listFilter);
     if (dueBefore) params.set("dueBefore", dueBefore);
@@ -260,7 +337,9 @@ export default function SubtasksPage() {
   const availableAssignees: ClickUpAssignee[] = useMemo(() => {
     if (data?.availableAssignees && data.availableAssignees.length > 0) {
       console.log("[v0] Available assignees from API:", data.availableAssignees.length);
-      return data.availableAssignees;
+      return [...data.availableAssignees].sort((a, b) =>
+        a.username.localeCompare(b.username)
+      );
     }
     // Fallback: derive from tasks
     const seen = new Map<number, ClickUpAssignee>();
@@ -271,10 +350,36 @@ export default function SubtasksPage() {
         }
       }
     }
-    const derived = [...seen.values()];
+    const derived = [...seen.values()].sort((a, b) =>
+      a.username.localeCompare(b.username)
+    );
     console.log("[v0] Derived assignees from tasks:", derived.length);
     return derived;
   }, [data?.availableAssignees, tasks]);
+
+  const assigneeFilterOptions = useMemo(() => {
+    const map = new Map<string, string>();
+
+    map.set("unassigned", "Unassigned");
+
+    for (const a of availableAssignees) {
+      map.set(a.username.toLowerCase(), a.username);
+    }
+
+    for (const selected of assigneeFilter) {
+      if (!map.has(selected)) {
+        map.set(selected, selected);
+      }
+    }
+
+    return [...map.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => {
+        if (a.value === "unassigned") return -1;
+        if (b.value === "unassigned") return 1;
+        return a.label.localeCompare(b.label);
+      });
+  }, [availableAssignees, assigneeFilter]);
 
   // ClickUp fixed priorities
   const availablePriorities = useMemo(() => {
@@ -381,16 +486,17 @@ export default function SubtasksPage() {
     return [...names].sort();
   }, [tasks]);
 
-  const hasActiveFilters = !!(
-    search || statusFilter || csmFilter || assigneeFilter || priorityFilter || listFilter || dueBefore || dueAfter
-  );
+  const activeFilterCount =
+    [search, statusFilter, csmFilter, priorityFilter, listFilter, dueBefore, dueAfter].filter(Boolean)
+      .length + assigneeFilter.length;
+  const hasActiveFilters = activeFilterCount > 0;
 
   const clearAllFilters = useCallback(() => {
     setSearch("");
     setSearchInput("");
     setStatusFilter("");
     setCsmFilter("");
-    setAssigneeFilter("");
+    setAssigneeFilter([]);
     setPriorityFilter("");
     setListFilter("");
     setDueBefore("");
@@ -513,7 +619,7 @@ export default function SubtasksPage() {
               Filters
               {hasActiveFilters && (
                 <span className="ml-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
-                  {[search, statusFilter, csmFilter, assigneeFilter, priorityFilter, listFilter, dueBefore, dueAfter].filter(Boolean).length}
+                  {activeFilterCount}
                 </span>
               )}
             </button>
@@ -568,19 +674,15 @@ export default function SubtasksPage() {
               {/* Assignee */}
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-muted-foreground">Assignee</label>
-                <select
-                  value={assigneeFilter}
-                  onChange={(e) => { setAssigneeFilter(e.target.value); setPage(1); }}
-                  className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground"
-                >
-                  <option value="">All assignees</option>
-                  <option value="unassigned">Unassigned</option>
-                  {availableAssignees.map((a) => (
-                    <option key={a.id} value={a.username.toLowerCase()}>
-                      {a.username}
-                    </option>
-                  ))}
-                </select>
+                <MultiSelectDropdown
+                  label="All assignees"
+                  options={assigneeFilterOptions}
+                  selected={assigneeFilter}
+                  onChange={(next) => {
+                    setAssigneeFilter(next);
+                    setPage(1);
+                  }}
+                />
               </div>
 
               {/* Priority */}

@@ -184,6 +184,11 @@ function getAssignee(task: LocalClickUpTask) {
   return task.assignees?.[0]?.username || "Unassigned";
 }
 
+function getAssigneeNames(task: LocalClickUpTask): string[] {
+  if (!task.assignees?.length) return ["Unassigned"];
+  return [...new Set(task.assignees.map((a) => a.username))];
+}
+
 function getListName(task: LocalClickUpTask) {
   return task.list?.name || task.list?.id || "Unknown";
 }
@@ -972,7 +977,7 @@ export default function DashboardPage() {
     [tasks]
   );
   const allAssignees = useMemo(
-    () => [...new Set(tasks.map(getAssignee))].sort(),
+    () => [...new Set(tasks.flatMap(getAssigneeNames))].sort(),
     [tasks]
   );
   const allLists = useMemo(
@@ -988,7 +993,10 @@ export default function DashboardPage() {
       result = result.filter((t) => statusFilter.includes(t.status.status));
 
     if (assigneeFilter.length > 0)
-      result = result.filter((t) => assigneeFilter.includes(getAssignee(t)));
+      result = result.filter((t) => {
+        const assignees = getAssigneeNames(t);
+        return assigneeFilter.some((selected) => assignees.includes(selected));
+      });
 
     if (listFilter.length > 0)
       result = result.filter((t) => listFilter.includes(getListName(t)));

@@ -33,7 +33,10 @@ async function handleRequest(req: NextRequest) {
   const search = (sp.get("search") || "").toLowerCase().trim();
   const statusFilter = sp.get("status") || "";
   const csmFilter = (sp.get("csm") || "").toLowerCase().trim();
-  const assigneeFilter = (sp.get("assignee") || "").toLowerCase().trim();
+  const assigneeFilters = sp
+    .getAll("assignee")
+    .map((v) => v.toLowerCase().trim())
+    .filter(Boolean);
   const priorityFilter = (sp.get("priority") || "").toLowerCase().trim();
   const listFilter = (sp.get("list") || "").toLowerCase().trim();
   const dueBefore = sp.get("dueBefore") || "";
@@ -174,6 +177,27 @@ async function handleRequest(req: NextRequest) {
   }
   const availableLists = [...listSet].sort();
 
+  // Build a stable assignee list from workspace members + all subtasks assignees
+  // so the frontend filter options do not change with page/filter state.
+  const assigneeMap = new Map<number, ClickUpAssignee>();
+  for (const member of availableAssignees) {
+    assigneeMap.set(member.id, member);
+  }
+  for (const st of subtasks) {
+    for (const a of st.assignees) {
+      if (!assigneeMap.has(a.id)) {
+        assigneeMap.set(a.id, {
+          id: a.id,
+          username: a.username,
+          profilePicture: a.profilePicture,
+        });
+      }
+    }
+  }
+  const stableAvailableAssignees = [...assigneeMap.values()].sort((a, b) =>
+    a.username.localeCompare(b.username)
+  );
+
   // Apply filters
   let filtered = subtasks;
 
@@ -198,13 +222,16 @@ async function handleRequest(req: NextRequest) {
     );
   }
 
-  if (assigneeFilter) {
+  if (assigneeFilters.length > 0) {
     filtered = filtered.filter(
-      (t) =>
-        t.assignees.some(
-          (a) => a.username.toLowerCase() === assigneeFilter
-        ) ||
-        (t.assignees.length === 0 && assigneeFilter === "unassigned")
+      (t) => {
+        if (t.assignees.length === 0) {
+          return assigneeFilters.includes("unassigned");
+        }
+        return t.assignees.some((a) =>
+          assigneeFilters.includes(a.username.toLowerCase())
+        );
+      }
     );
   }
 
@@ -262,7 +289,7 @@ async function handleRequest(req: NextRequest) {
     totalPages: Math.ceil(total / limit),
     availableCSMs,
     availableStatuses,
-    availableAssignees,
+    availableAssignees: stableAvailableAssignees,
     availablePriorities,
     availableLists,
     cachedAt: cachedAt?.toISOString() ?? null,
